@@ -180,7 +180,7 @@ func (k *kup) processExtraArgs() {
 			k.addArg("gke-environment", "prod")
 			k.addArg("gke-shape", "{\"default\":{\"Nodes\":$size,\"MachineType\":\"n1-standard-1\"}}")
 		case "gce":
-			k.addArg("gcp-node", "n1-standard-1")
+			k.addArg("gcp-node-size", "n1-standard-1")
 			k.addIntArg("gcp-nodes", k.size)
 		case "kubemark":
 			k.addArg("gcp-node-image", "gci")
