@@ -5,32 +5,44 @@ import (
 	"fmt"
 	"os"
 	"strings"
+)
 
-	"github.com/oxddr/kutil/kup/preset"
+const (
+	setCommonEnv = "$HOME/src/github.com/mm4tt/k8s-util/set-common-envs/set-common-envs.sh"
 )
 
 var (
-	debug    = flag.Bool("debug", false, "debug mode")
-	build    = flag.Bool("build", false, "Whether to include build command")
-	size     = flag.Int("size", 3, "Size of the cluster")
-	project  = flag.String("project", "k8s-scale-testing", "Name of the GCP project")
-	provider = flag.String("provider", "gce", "Name of the provider [supported: gce, gke, kubemark]")
-	name     = flag.String("name", "", "Name of the cluster")
-	output   = flag.String("output", "$HOME/debug", "Parent directory for output")
-	timeout  = flag.String("timeout", "", "Test timeout")
-	up       = flag.Bool("up", true, "Whether to create a cluster")
-	density  = flag.Bool("density", false, "Whether to run density tests")
-	load     = flag.Bool("load", false, "Whether to run load tests")
-	zone     = flag.String("zone", "us-east1-b", "Which GCP zone to run")
-	userEnv  = flag.String("env", "", "Additional environmental variables to pass")
+	kubeUp  KubeUp
+	userEnv string
 )
+
+func initFlags() {
+	flag.BoolVar(&kubeUp.density, "density", false, "Whether to run density tests")
+	flag.BoolVar(&kubeUp.load, "load", false, "Whether to run load tests")
+	flag.BoolVar(&kubeUp.up, "up", true, "Whether to create a cluster")
+	flag.BoolVar(&kubeUp.build, "build", true, "Whether to include build command")
+	flag.BoolVar(&kubeUp.prometheus, "prometheus", false, "Whether to enable Prometheus and keep it running once tests are finished")
+	flag.IntVar(&kubeUp.size, "size", 3, "Size of the cluster")
+	flag.StringVar(&kubeUp.timeout, "timeout", "", "Test timeout")
+	flag.StringVar(&kubeUp.zone, "zone", "us-east1-b", "Which GCP zone to run")
+	flag.StringVar(&kubeUp.name, "name", "", "Name of the cluster")
+	flag.StringVar(&kubeUp.output, "output", "$HOME/debug", "Parent directory for output")
+	flag.StringVar(&kubeUp.project, "project", "k8s-scale-testing", "Name of the GCP project")
+	flag.StringVar(&kubeUp.provider, "provider", "gce", "Name of the provider [supported: gce, gke, kubemark]")
+	flag.StringVar(&kubeUp.testInfraCommit, "test-infra-commit", "", "Commit to be used to load presets")
+	flag.BoolVar(&kubeUp.debug, "debug", false, "debug mode")
+
+	flag.StringVar(&userEnv, "env", "", "Additional environmental variables to pass")
+
+	flag.Parse()
+}
 
 type env struct {
 	name  string
 	value string
 }
 
-type kup struct {
+type KubeUp struct {
 	cmds      []string
 	extraArgs []string
 
@@ -38,18 +50,20 @@ type kup struct {
 
 	prepared bool
 
-	debug    bool
-	build    bool
-	size     int
-	project  string
-	provider string
-	zone     string
-	name     string
-	output   string
-	timeout  string
-	up       bool
-	density  bool
-	load     bool
+	debug           bool
+	build           bool
+	size            int
+	project         string
+	provider        string
+	zone            string
+	name            string
+	output          string
+	timeout         string
+	testInfraCommit string
+	up              bool
+	density         bool
+	load            bool
+	prometheus      bool
 }
 
 func formatArg(name, value string) string {
@@ -78,12 +92,12 @@ func parseUserEnv(envString string) ([]env, error) {
 	return result, nil
 }
 
-func (k *kup) NodesForKubemark() int {
+func (k *KubeUp) NodesForKubemark() int {
 	// TODO(oxddr): implement sizing logic in here
 	return 83
 }
 
-func (k *kup) RealProvider() string {
+func (k *KubeUp) RealProvider() string {
 	if k.provider == "kubemark" {
 		return "gce"
 	}
@@ -91,54 +105,47 @@ func (k *kup) RealProvider() string {
 
 }
 
-func (k *kup) Timeout() string {
+func (k *KubeUp) Timeout() string {
 	if k.timeout != "" {
 		return k.timeout
 	}
 	return "1290m"
 }
 
-func (k *kup) addArg(name, value string) {
+func (k *KubeUp) addArg(name, value string) {
 	k.extraArgs = append(k.extraArgs, formatArg(name, value))
 }
 
-func (k *kup) addIntArg(name string, value int) {
+func (k *KubeUp) addIntArg(name string, value int) {
 	k.extraArgs = append(k.extraArgs, formatIntArg(name, value))
 }
 
-func (k *kup) addSwitch(name string) {
+func (k *KubeUp) addSwitch(name string) {
 	k.extraArgs = append(k.extraArgs, fmt.Sprintf("--%s", name))
 }
 
-func (k *kup) exportEnv(name, value string) {
+func (k *KubeUp) exportEnv(name, value string) {
 	k.addCmd(fmt.Sprintf("export %s=\"%s\"", name, value))
 }
 
-func (k *kup) applyPreset(presetName string) error {
+func (k *KubeUp) applyPreset(presetName string) {
 	k.addCmd(fmt.Sprintf("# preset: %s", presetName))
-	presetEnv, err := preset.ReadPresetEnv(presetName)
-	if err != nil {
-		return err
-	}
-	for _, env := range presetEnv {
-		k.exportEnv(env.Name, env.Value)
-	}
+	k.addCmd(fmt.Sprintf("source %s %s %s", setCommonEnv, presetName, k.testInfraCommit))
 	k.addEmptyLine()
-	return nil
 }
 
-func (k *kup) addEmptyLine() {
+func (k *KubeUp) addEmptyLine() {
 	k.addCmd("")
 }
 
-func (k *kup) addCmd(cmd string) {
-	if *debug {
+func (k *KubeUp) addCmd(cmd string) {
+	if k.debug {
 		cmd = fmt.Sprintf("echo '%s'", cmd)
 	}
 	k.cmds = append(k.cmds, cmd)
 }
 
-func (k *kup) maybeCreateOutput() {
+func (k *KubeUp) maybeCreateOutput() {
 	if k.up || k.load || k.density {
 		k.addCmd(fmt.Sprintf("export OUTPUT=\"%s/run-$(date +%%m%%d-%%H%%M%%S)\"", k.output))
 		k.addCmd("mkdir -p \"$OUTPUT\"")
@@ -146,14 +153,14 @@ func (k *kup) maybeCreateOutput() {
 	}
 }
 
-func (k *kup) maybeBuild() {
+func (k *KubeUp) maybeBuild() {
 	if k.build {
 		k.addCmd("make quick-release")
 		k.addEmptyLine()
 	}
 }
 
-func (k *kup) addExtraEnv() {
+func (k *KubeUp) addExtraEnv() {
 	if len(k.extraEnv) == 0 {
 		return
 	}
@@ -165,7 +172,7 @@ func (k *kup) addExtraEnv() {
 	k.addEmptyLine()
 }
 
-func (k *kup) processExtraArgs() {
+func (k *KubeUp) processExtraArgs() {
 	k.addArg("provider", k.RealProvider())
 	k.addArg("gcp-project", k.project)
 	k.addArg("gcp-zone", k.zone)
@@ -212,6 +219,11 @@ func (k *kup) processExtraArgs() {
 		if k.Timeout() != "" {
 			k.addArg("timeout", k.Timeout())
 		}
+		if k.prometheus {
+			k.addArg("test-cmd-args", formatArg("enable-prometheus-server", "true"))
+			k.addArg("test-cmd-args", formatArg("tear-down-prometheus-server", "false"))
+			k.addArg("test-cmd-args", formatArg("experimental-gcp-snapshot-prometheus-disk", "true"))
+		}
 	}
 
 	k.extraArgs = append(k.extraArgs, flag.Args()...)
@@ -221,7 +233,7 @@ func (k *kup) processExtraArgs() {
 	}
 }
 
-func (k *kup) prepareCommands() error {
+func (k *KubeUp) prepareCommands() error {
 	k.maybeCreateOutput()
 	k.maybeBuild()
 
@@ -230,17 +242,11 @@ func (k *kup) prepareCommands() error {
 		k.addEmptyLine()
 	}
 
-	if err := k.applyPreset("preset-e2e-scalability-common"); err != nil {
-		return err
-	}
+	k.applyPreset("preset-e2e-scalability-common")
 
 	if k.provider == "kubemark" {
-		if err := k.applyPreset("preset-e2e-kubemark-common"); err != nil {
-			return err
-		}
-		if err := k.applyPreset("preset-e2e-kubemark-gce-scale"); err != nil {
-			return err
-		}
+		k.applyPreset("preset-e2e-kubemark-common")
+		k.applyPreset("preset-e2e-kubemark-gce-scale")
 
 		// KUBE_GCE_NETWORK and INSTANCE_PREFIX are required by
 		// the kubemark creation script. This is a temporary workaround.
@@ -259,7 +265,7 @@ func (k *kup) prepareCommands() error {
 	return nil
 }
 
-func (k *kup) GetCommands() (string, error) {
+func (k *KubeUp) GetCommands() (string, error) {
 	if !k.prepared {
 		if err := k.prepareCommands(); err != nil {
 			return "", err
@@ -275,29 +281,15 @@ func handleErr(err error) {
 }
 
 func main() {
-	flag.Parse()
+	initFlags()
 
-	extraEnv, err := parseUserEnv(*userEnv)
+	var err error
+	kubeUp.extraEnv, err = parseUserEnv(userEnv)
 	if err != nil {
 		handleErr(err)
 	}
 
-	kup := &kup{
-		build:    *build,
-		size:     *size,
-		project:  *project,
-		provider: *provider,
-		name:     *name,
-		output:   *output,
-		timeout:  *timeout,
-		up:       *up,
-		density:  *density,
-		load:     *load,
-		zone:     *zone,
-		extraEnv: extraEnv,
-	}
-	cmds, err := kup.GetCommands()
-
+	cmds, err := kubeUp.GetCommands()
 	if err != nil {
 		handleErr(err)
 	}
