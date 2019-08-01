@@ -21,16 +21,18 @@ func initFlags() {
 	flag.BoolVar(&kubeUp.load, "load", false, "Whether to run load tests")
 	flag.BoolVar(&kubeUp.up, "up", true, "Whether to create a cluster")
 	flag.BoolVar(&kubeUp.build, "build", true, "Whether to include build command")
-	flag.BoolVar(&kubeUp.prometheus, "prometheus", false, "Whether to enable Prometheus and keep it running once tests are finished")
+	flag.BoolVar(&kubeUp.stable, "stable", false, "Whether to use perf-tests or perf-tests-dev")
+	flag.BoolVar(&kubeUp.prometheus, "prometheus", true, "Whether to enable Prometheus and keep it running once tests are finished")
 	flag.IntVar(&kubeUp.size, "size", 3, "Size of the cluster")
 	flag.StringVar(&kubeUp.timeout, "timeout", "", "Test timeout")
-	flag.StringVar(&kubeUp.zone, "zone", "us-east1-b", "Which GCP zone to run")
+	flag.StringVar(&kubeUp.zone, "zone", "europe-north1-a", "Which GCP zone to run")
 	flag.StringVar(&kubeUp.name, "name", "", "Name of the cluster")
 	flag.StringVar(&kubeUp.output, "output", "$HOME/debug", "Parent directory for output")
 	flag.StringVar(&kubeUp.project, "project", "k8s-scale-testing", "Name of the GCP project")
 	flag.StringVar(&kubeUp.provider, "provider", "gce", "Name of the provider [supported: gce, gke, kubemark]")
 	flag.StringVar(&kubeUp.testInfraCommit, "test-infra-commit", "", "Commit to be used to load presets")
 	flag.BoolVar(&kubeUp.debug, "debug", false, "debug mode")
+	flag.BoolVar(&kubeUp.private, "private", true, "use private cluster")
 
 	flag.StringVar(&userEnv, "env", "", "Additional environmental variables to pass")
 
@@ -60,6 +62,7 @@ type KubeUp struct {
 	output          string
 	timeout         string
 	testInfraCommit string
+	private         bool
 	up              bool
 	density         bool
 	load            bool
@@ -234,28 +237,37 @@ func (k *KubeUp) processExtraArgs() {
 }
 
 func (k *KubeUp) prepareCommands() error {
+	k.addCmd("set -e")
 	k.maybeCreateOutput()
 	k.maybeBuild()
 
-	if k.provider == "gce" && k.size == 5000 {
-		k.exportEnv("HEAPSTER_MACHINE_TYPE", "n1-standard-32")
-		k.addEmptyLine()
+	if k.up {
+		if k.provider == "gce" && k.size >= 2000 {
+			k.exportEnv("HEAPSTER_MACHINE_TYPE", "n1-standard-32")
+			k.addEmptyLine()
+		}
+
+		k.exportEnv("KUBE_GCE_WINDOWS_NODES", "false")
+
+		k.applyPreset("preset-e2e-scalability-common")
+
+		if k.provider == "kubemark" {
+			k.applyPreset("preset-e2e-kubemark-common")
+			k.applyPreset("preset-e2e-kubemark-gce-scale")
+
+			// KUBE_GCE_NETWORK and INSTANCE_PREFIX are required by
+			// the kubemark creation script. This is a temporary workaround.
+			k.addCmd("# KUBE_GCE_NETWORK and INSTANCE_PREFIX are required by")
+			k.addCmd("# the kubemark creation script. This is a temporary workaround.")
+			k.exportEnv("KUBE_GCE_NETWORK", "e2e-${USER}")
+			k.exportEnv("INSTANCE_PREFIX", "e2e-${USER}")
+			k.exportEnv("KUBE_GCE_INSTANCE_PREFIX", "e2e-${USER}")
+			k.addEmptyLine()
+		}
 	}
 
-	k.applyPreset("preset-e2e-scalability-common")
-
-	if k.provider == "kubemark" {
-		k.applyPreset("preset-e2e-kubemark-common")
-		k.applyPreset("preset-e2e-kubemark-gce-scale")
-
-		// KUBE_GCE_NETWORK and INSTANCE_PREFIX are required by
-		// the kubemark creation script. This is a temporary workaround.
-		k.addCmd("# KUBE_GCE_NETWORK and INSTANCE_PREFIX are required by")
-		k.addCmd("# the kubemark creation script. This is a temporary workaround.")
-		k.exportEnv("KUBE_GCE_NETWORK", "e2e-${USER}")
-		k.exportEnv("INSTANCE_PREFIX", "e2e-${USER}")
-		k.exportEnv("KUBE_GCE_INSTANCE_PREFIX", "e2e-${USER}")
-		k.addEmptyLine()
+	if k.private {
+		k.exportEnv("KUBE_GCE_PRIVATE_CLUSTER", "true")
 	}
 
 	k.addExtraEnv()
