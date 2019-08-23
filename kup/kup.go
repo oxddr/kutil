@@ -21,14 +21,13 @@ func initFlags() {
 	flag.BoolVar(&kubeUp.load, "load", false, "Whether to run load tests")
 	flag.BoolVar(&kubeUp.up, "up", true, "Whether to create a cluster")
 	flag.BoolVar(&kubeUp.build, "build", true, "Whether to include build command")
-	flag.BoolVar(&kubeUp.stable, "stable", false, "Whether to use perf-tests or perf-tests-dev")
 	flag.BoolVar(&kubeUp.prometheus, "prometheus", true, "Whether to enable Prometheus and keep it running once tests are finished")
 	flag.IntVar(&kubeUp.size, "size", 3, "Size of the cluster")
 	flag.StringVar(&kubeUp.timeout, "timeout", "", "Test timeout")
 	flag.StringVar(&kubeUp.zone, "zone", "europe-north1-a", "Which GCP zone to run")
 	flag.StringVar(&kubeUp.name, "name", "", "Name of the cluster")
 	flag.StringVar(&kubeUp.output, "output", "$HOME/debug", "Parent directory for output")
-	flag.StringVar(&kubeUp.project, "project", "k8s-scale-testing", "Name of the GCP project")
+	flag.StringVar(&kubeUp.project, "project", "", "Name of the GCP project")
 	flag.StringVar(&kubeUp.provider, "provider", "gce", "Name of the provider [supported: gce, gke, kubemark]")
 	flag.StringVar(&kubeUp.testInfraCommit, "test-infra-commit", "", "Commit to be used to load presets")
 	flag.BoolVar(&kubeUp.debug, "debug", false, "debug mode")
@@ -274,6 +273,7 @@ func (k *KubeUp) prepareCommands() error {
 	k.processExtraArgs()
 	// TODO(oxddr): add an option to use bare kubetest
 	k.addCmd(fmt.Sprintf("go run hack/e2e.go -v -- \\\n  %s", strings.Join(k.extraArgs, " \\\n  ")))
+	k.addCmd("echo Results in $OUTPUT")
 	return nil
 }
 
