@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
+	"sort"
+	"strconv"
 	"time"
 )
 
@@ -18,6 +20,7 @@ const (
 var (
 	threshold = flag.Float64("threshold", 0.1, "Failure threshold.")
 	mode      = flag.String("mode", "compare", "Mode")
+	baseline  = flag.String("baseline", "", "")
 )
 
 type APIResponsiveness struct {
@@ -38,6 +41,7 @@ type Labels struct {
 	Scope       string `json:"Scope"`
 	Subresource string `json:"Subresource"`
 	Verb        string `json:"Verb"`
+	Count       string `json:"Count"`
 }
 
 func (l *Labels) asKey() string {
@@ -46,7 +50,14 @@ func (l *Labels) asKey() string {
 		key = fmt.Sprintf("%s/%s", key, l.Subresource)
 	}
 	return key
+}
 
+func (l *Labels) count() int {
+	i, err := strconv.Atoi(l.Count)
+	if err != nil {
+		log.Fatalf("cannot convert count: %s", l.Count)
+	}
+	return i
 }
 
 func (d *APIResponsiveness) asMap() map[string]time.Duration {
@@ -99,32 +110,41 @@ func compareResults(base, result *APIResponsiveness) {
 	fmt.Printf("good: %d, bad %d\n", good, bad)
 }
 
-func compare() error {
-	if flag.NArg() != 2 {
-		return errors.New("expected 2 positional arguments: path to baseline and result")
-	}
-
-	path := flag.Args()[0]
-	baseline, err := parseResults(path)
+func compare(result *APIResponsiveness) error {
+	baseline, err := parseResults(*baseline)
 	if err != nil {
 		return err
-	}
-	path = flag.Args()[1]
-	result, err := parseResults(path)
-	if err != nil {
-		return err
-
 	}
 	compareResults(baseline, result)
 	return nil
 }
 
+func printSorted(result *APIResponsiveness) {
+	sort.Slice(result.DataItems, func(i, j int) bool {
+		return result.DataItems[i].Labels.count() > result.DataItems[j].Labels.count()
+	})
+	for _, i := range result.DataItems {
+		fmt.Printf("%d %s\n", i.Labels.count(), i.Labels.asKey())
+	}
+}
+
 func main() {
 	flag.Parse()
-	var err error
+	if flag.NArg() != 1 {
+		log.Fatalf("expected 1 positional arguments: path to result, got: %v", flag.Args())
+	}
+
+	result, err := parseResults(flag.Arg(0))
+	if err != nil {
+		log.Fatalf("error while parsing result: %v", err)
+
+	}
+
 	switch *mode {
 	case "compare":
-		err = compare()
+		err = compare(result)
+	case "sort":
+		printSorted(result)
 	default:
 		err = errors.New("unknown mode")
 	}
