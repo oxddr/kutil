@@ -3,7 +3,6 @@ package main
 import (
 	"flag"
 	"fmt"
-	"os"
 	"strings"
 )
 
@@ -11,12 +10,9 @@ const (
 	setCommonEnv = "$HOME/src/github.com/mm4tt/k8s-util/set-common-envs/set-common-envs.sh"
 )
 
-var (
-	kubeUp  KubeUp
-	userEnv string
-)
+var kubeUp KubeUp
 
-func initFlags() {
+func kubeUpFlags() {
 	flag.BoolVar(&kubeUp.density, "density", false, "Whether to run density tests")
 	flag.BoolVar(&kubeUp.load, "load", false, "Whether to run load tests")
 	flag.BoolVar(&kubeUp.up, "up", true, "Whether to create a cluster")
@@ -32,10 +28,7 @@ func initFlags() {
 	flag.StringVar(&kubeUp.testInfraCommit, "test-infra-commit", "", "Commit to be used to load presets")
 	flag.BoolVar(&kubeUp.debug, "debug", false, "debug mode")
 	flag.BoolVar(&kubeUp.private, "private", true, "use private cluster")
-
-	flag.StringVar(&userEnv, "env", "", "Additional environmental variables to pass")
-
-	flag.Parse()
+	flag.Var(&kubeUp.extraEnv, "env", "Additional environmental variables to pass")
 }
 
 type env struct {
@@ -43,14 +36,97 @@ type env struct {
 	value string
 }
 
+type envSlice []env
+
+func (s *envSlice) String() string {
+	return fmt.Sprintf("%s", *s)
+}
+
+func (s *envSlice) Set(value string) error {
+	tokens := strings.Split(value, "=")
+	if len(tokens) != 2 {
+		return fmt.Errorf("malformed env: %s", value)
+	}
+	*s = append(*s, env{name: tokens[0], value: tokens[1]})
+	return nil
+}
+
+func formatArg(name, value string) string {
+	return fmt.Sprintf("--%s=%s", name, value)
+}
+
+func formatIntArg(name string, value int) string {
+	return fmt.Sprintf("--%s=%d", name, value)
+}
+
+type command struct {
+	base string
+	args []string
+}
+
+func (c *command) String() string {
+	return fmt.Sprintf("%s \\\n  %s", c.base, strings.Join(c.args, " \\\n  "))
+}
+
+func newCommand(cmd string) command {
+	return command{base: cmd, args: make([]string, 0)}
+}
+
+func (c *command) AddArg(name, value string) {
+	c.args = append(c.args, formatArg(name, value))
+}
+
+func (c *command) AddIntArg(name string, value int) {
+	c.args = append(c.args, formatIntArg(name, value))
+}
+
+func (c *command) AddSwitch(name string) {
+	c.args = append(c.args, fmt.Sprintf("--%s", name))
+}
+
+func (c *command) AddRaw(str string) {
+	c.args = append(c.args, str)
+}
+
+type scriptBuilder struct {
+	cmds  []string
+	debug bool
+}
+
+func newBuilder(debug bool) *scriptBuilder {
+	return &scriptBuilder{debug: debug, cmds: make([]string, 0)}
+}
+
+func (b *scriptBuilder) AddCmd(cmd string) {
+	if b.debug {
+		cmd = fmt.Sprintf("echo '%s'", cmd)
+	}
+	if b.cmds == nil {
+		b.cmds = make([]string, 10)
+	}
+	b.cmds = append(b.cmds, cmd)
+}
+
+func (b *scriptBuilder) AddEmptyLine() {
+	b.AddCmd("")
+}
+
+func (b *scriptBuilder) ExportEnv(name, value string) {
+	b.AddCmd(fmt.Sprintf("export %s=\"%s\"", name, value))
+}
+
+func (b *scriptBuilder) String() string {
+	var str strings.Builder
+	for _, c := range b.cmds {
+		str.WriteString(fmt.Sprintf("%s\n", c))
+	}
+	return str.String()
+}
+
 type KubeUp struct {
-	cmds      []string
-	extraArgs []string
+	builder *scriptBuilder
 
-	extraEnv []env
-
-	prepared bool
-
+	extraEnv        envSlice
 	debug           bool
 	build           bool
 	size            int
@@ -66,32 +142,6 @@ type KubeUp struct {
 	density         bool
 	load            bool
 	prometheus      bool
-}
-
-func formatArg(name, value string) string {
-	return fmt.Sprintf("--%s=%s", name, value)
-}
-
-func formatIntArg(name string, value int) string {
-	return fmt.Sprintf("--%s=%d", name, value)
-}
-
-func parseUserEnv(envString string) ([]env, error) {
-	if envString == "" {
-		return make([]env, 0), nil
-	}
-
-	envList := strings.Split(envString, ",")
-	var result []env
-	for _, e := range envList {
-		pair := strings.Split(e, "=")
-		if len(pair) != 2 {
-			return nil, fmt.Errorf("malformed env passed: %s", envString)
-		}
-		result = append(result, env{name: pair[0], value: pair[1]})
-
-	}
-	return result, nil
 }
 
 func (k *KubeUp) NodesForKubemark() int {
@@ -114,51 +164,24 @@ func (k *KubeUp) Timeout() string {
 	return "1290m"
 }
 
-func (k *KubeUp) addArg(name, value string) {
-	k.extraArgs = append(k.extraArgs, formatArg(name, value))
-}
-
-func (k *KubeUp) addIntArg(name string, value int) {
-	k.extraArgs = append(k.extraArgs, formatIntArg(name, value))
-}
-
-func (k *KubeUp) addSwitch(name string) {
-	k.extraArgs = append(k.extraArgs, fmt.Sprintf("--%s", name))
-}
-
-func (k *KubeUp) exportEnv(name, value string) {
-	k.addCmd(fmt.Sprintf("export %s=\"%s\"", name, value))
-}
-
 func (k *KubeUp) applyPreset(presetName string) {
-	k.addCmd(fmt.Sprintf("# preset: %s", presetName))
-	k.addCmd(fmt.Sprintf("source %s %s %s", setCommonEnv, presetName, k.testInfraCommit))
-	k.addEmptyLine()
-}
-
-func (k *KubeUp) addEmptyLine() {
-	k.addCmd("")
-}
-
-func (k *KubeUp) addCmd(cmd string) {
-	if k.debug {
-		cmd = fmt.Sprintf("echo '%s'", cmd)
-	}
-	k.cmds = append(k.cmds, cmd)
+	k.builder.AddCmd(fmt.Sprintf("# preset: %s", presetName))
+	k.builder.AddCmd(fmt.Sprintf("source %s %s %s", setCommonEnv, presetName, k.testInfraCommit))
+	k.builder.AddEmptyLine()
 }
 
 func (k *KubeUp) maybeCreateOutput() {
 	if k.up || k.load || k.density {
-		k.addCmd(fmt.Sprintf("export OUTPUT=\"%s/run-$(date +%%m%%d-%%H%%M%%S)\"", k.output))
-		k.addCmd("mkdir -p \"$OUTPUT\"")
-		k.addEmptyLine()
+		k.builder.AddCmd(fmt.Sprintf("export OUTPUT=\"%s/run-$(date +%%m%%d-%%H%%M%%S)\"", k.output))
+		k.builder.AddCmd("mkdir -p \"$OUTPUT\"")
+		k.builder.AddEmptyLine()
 	}
 }
 
 func (k *KubeUp) maybeBuild() {
 	if k.build {
-		k.addCmd("make quick-release")
-		k.addEmptyLine()
+		k.builder.AddCmd("make quick-release")
+		k.builder.AddEmptyLine()
 	}
 }
 
@@ -167,86 +190,97 @@ func (k *KubeUp) addExtraEnv() {
 		return
 	}
 
-	k.addCmd("# user-specified variables")
+	k.builder.AddCmd("# user-specified variables")
 	for _, env := range k.extraEnv {
-		k.exportEnv(env.name, env.value)
+		k.builder.ExportEnv(env.name, env.value)
 	}
-	k.addEmptyLine()
+	k.builder.AddEmptyLine()
 }
 
-func (k *KubeUp) processExtraArgs() {
-	k.addArg("provider", k.RealProvider())
-	k.addArg("gcp-project", k.project)
-	k.addArg("gcp-zone", k.zone)
+func (k *KubeUp) buildRunCommand() {
+	cmd := newCommand("go run hack/e2e.go -v --")
+
+	cmd.AddArg("provider", k.RealProvider())
+	cmd.AddArg("gcp-project", k.project)
+	cmd.AddArg("gcp-zone", k.zone)
 
 	if k.up {
-		k.addSwitch("up")
+		cmd.AddSwitch("up")
 		switch k.provider {
 		case "gke":
-			k.addArg("deployment", "gke")
-			k.addArg("gcp-network", k.name)
-			k.addArg("gcp-node-image", "gci")
-			k.addArg("gke-environment", "prod")
-			k.addArg("gke-shape", "{\"default\":{\"Nodes\":$size,\"MachineType\":\"n1-standard-1\"}}")
+			cmd.AddArg("deployment", "gke")
+			cmd.AddArg("gcp-network", k.name)
+			cmd.AddArg("gcp-node-image", "gci")
+			cmd.AddArg("gke-environment", "prod")
+			cmd.AddArg("gke-shape", "{\"default\":{\"Nodes\":$size,\"MachineType\":\"n1-standard-1\"}}")
 		case "gce":
-			k.addArg("gcp-node-size", "n1-standard-1")
-			k.addIntArg("gcp-nodes", k.size)
+			cmd.AddArg("gcp-node-size", "n1-standard-1")
+			cmd.AddIntArg("gcp-nodes", k.size)
 		case "kubemark":
-			k.addArg("gcp-node-image", "gci")
-			k.addArg("gcp-node-size", "n1-standard-8")
-			k.addIntArg("gcp-nodes", k.NodesForKubemark())
-			k.addIntArg("kubemark-nodes", k.size)
-			k.addSwitch("kubemark")
+			cmd.AddArg("gcp-node-image", "gci")
+			cmd.AddArg("gcp-node-size", "n1-standard-8")
+			cmd.AddIntArg("gcp-nodes", k.NodesForKubemark())
+			cmd.AddIntArg("kubemark-nodes", k.size)
+			cmd.AddSwitch("kubemark")
 		}
 	}
 
 	if k.load || k.density {
-		k.addArg("test", "false")
-		k.addArg("test-cmd-name", "ClusterLoaderV2")
-		k.addArg("test-cmd", "$GOPATH/src/k8s.io/perf-tests/run-e2e.sh")
-		k.addArg("test-cmd-args", "cluster-loader2")
-		k.addArg("test-cmd-args", formatIntArg("nodes", k.size))
-		k.addArg("test-cmd-args", formatArg("provider", k.provider))
-		k.addArg("test-cmd-args", formatArg("report-dir", "\"$OUTPUT/_artifacts\""))
+		cmd.AddArg("test", "false")
+		cmd.AddArg("test-cmd-name", "ClusterLoaderV2")
+		cmd.AddArg("test-cmd", "$GOPATH/src/k8s.io/perf-tests/run-e2e.sh")
+		cmd.AddArg("test-cmd-args", "cluster-loader2")
+		cmd.AddArg("test-cmd-args", formatIntArg("nodes", k.size))
+		cmd.AddArg("test-cmd-args", formatArg("provider", k.provider))
+		cmd.AddArg("test-cmd-args", formatArg("report-dir", "\"$OUTPUT/_artifacts\""))
 
 		if k.load {
-			k.addArg("test-cmd-args", formatArg("testconfig", "testing/load/config.yaml"))
+			cmd.AddArg("test-cmd-args", formatArg("testconfig", "testing/load/config.yaml"))
 		}
 		if k.density {
-			k.addArg("test-cmd-args", formatArg("testconfig", "testing/density/config.yaml"))
+			cmd.AddArg("test-cmd-args", formatArg("testconfig", "testing/density/config.yaml"))
 		}
 		if k.density && k.size == 5000 {
-			k.addArg("test-cmd-args", formatArg("testoverrides", "testing/density/5000_nodes/override.yaml"))
+			cmd.AddArg("test-cmd-args", formatArg("testoverrides", "testing/density/5000_nodes/override.yaml"))
 		}
 		if k.Timeout() != "" {
-			k.addArg("timeout", k.Timeout())
+			cmd.AddArg("timeout", k.Timeout())
 		}
 		if k.prometheus {
-			k.addArg("test-cmd-args", formatArg("enable-prometheus-server", "true"))
-			k.addArg("test-cmd-args", formatArg("tear-down-prometheus-server", "false"))
-			k.addArg("test-cmd-args", formatArg("experimental-gcp-snapshot-prometheus-disk", "true"))
+			cmd.AddArg("test-cmd-args", formatArg("enable-prometheus-server", "true"))
+			cmd.AddArg("test-cmd-args", formatArg("tear-down-prometheus-server", "false"))
+			cmd.AddArg("test-cmd-args", formatArg("experimental-gcp-snapshot-prometheus-disk", "true"))
 		}
 	}
 
-	k.extraArgs = append(k.extraArgs, flag.Args()...)
+	for _, a := range flag.Args() {
+		cmd.AddRaw(a)
+	}
 
 	if k.up || k.load || k.density {
-		k.extraArgs = append(k.extraArgs, "2>&1 | tee \"$OUTPUT/build-log.txt\"")
+		cmd.AddRaw("2>&1 | tee \"$OUTPUT/build-log.txt\"")
 	}
+	k.builder.AddCmd(cmd.String())
+
 }
 
-func (k *KubeUp) prepareCommands() error {
-	k.addCmd("set -e")
+func (k *KubeUp) String() string {
+	k.builder = newBuilder(k.debug)
+
+	k.builder.AddCmd("set -e")
 	k.maybeCreateOutput()
 	k.maybeBuild()
 
+	// temp dev variables
+	k.builder.ExportEnv("KUBEPROXY_TEST_LOG_LEVEL", "--v=4")
+	k.builder.ExportEnv("HEAPSTER_MACHINE_TYPE", "n1-standard-16")
+	k.builder.ExportEnv("PROMETHEUS_SCRAPE_KUBELETS", "true")
+
 	if k.up {
 		if k.provider == "gce" && k.size >= 2000 {
-			k.exportEnv("HEAPSTER_MACHINE_TYPE", "n1-standard-32")
-			k.addEmptyLine()
+			k.builder.ExportEnv("HEAPSTER_MACHINE_TYPE", "n1-standard-32")
+			k.builder.AddEmptyLine()
 		}
-
-		k.exportEnv("KUBE_GCE_WINDOWS_NODES", "false")
 
 		k.applyPreset("preset-e2e-scalability-common")
 
@@ -256,55 +290,28 @@ func (k *KubeUp) prepareCommands() error {
 
 			// KUBE_GCE_NETWORK and INSTANCE_PREFIX are required by
 			// the kubemark creation script. This is a temporary workaround.
-			k.addCmd("# KUBE_GCE_NETWORK and INSTANCE_PREFIX are required by")
-			k.addCmd("# the kubemark creation script. This is a temporary workaround.")
-			k.exportEnv("KUBE_GCE_NETWORK", "e2e-${USER}")
-			k.exportEnv("INSTANCE_PREFIX", "e2e-${USER}")
-			k.exportEnv("KUBE_GCE_INSTANCE_PREFIX", "e2e-${USER}")
-			k.addEmptyLine()
+			k.builder.AddCmd("# KUBE_GCE_NETWORK and INSTANCE_PREFIX are required by")
+			k.builder.AddCmd("# the kubemark creation script. This is a temporary workaround.")
+			k.builder.ExportEnv("KUBE_GCE_NETWORK", "e2e-${USER}")
+			k.builder.ExportEnv("INSTANCE_PREFIX", "e2e-${USER}")
+			k.builder.ExportEnv("KUBE_GCE_INSTANCE_PREFIX", "e2e-${USER}")
+			k.builder.AddEmptyLine()
 		}
-	}
-
-	if k.private {
-		k.exportEnv("KUBE_GCE_PRIVATE_CLUSTER", "true")
 	}
 
 	k.addExtraEnv()
-	k.processExtraArgs()
-	// TODO(oxddr): add an option to use bare kubetest
-	k.addCmd(fmt.Sprintf("go run hack/e2e.go -v -- \\\n  %s", strings.Join(k.extraArgs, " \\\n  ")))
-	k.addCmd("echo Results in $OUTPUT")
-	return nil
-}
 
-func (k *KubeUp) GetCommands() (string, error) {
-	if !k.prepared {
-		if err := k.prepareCommands(); err != nil {
-			return "", err
-		}
+	if k.private {
+		k.builder.ExportEnv("KUBE_GCE_PRIVATE_CLUSTER", "true")
 	}
-	return strings.Join(k.cmds, "\n"), nil
-}
 
-func handleErr(err error) {
-	fmt.Println(err)
-	os.Exit(1)
-
+	k.buildRunCommand()
+	k.builder.AddCmd("echo Results in $OUTPUT")
+	return k.builder.String()
 }
 
 func main() {
-	initFlags()
-
-	var err error
-	kubeUp.extraEnv, err = parseUserEnv(userEnv)
-	if err != nil {
-		handleErr(err)
-	}
-
-	cmds, err := kubeUp.GetCommands()
-	if err != nil {
-		handleErr(err)
-	}
-
-	fmt.Println(cmds)
+	kubeUpFlags()
+	flag.Parse()
+	fmt.Println(kubeUp.String())
 }
