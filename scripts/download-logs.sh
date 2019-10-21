@@ -3,9 +3,28 @@
 set -euo pipefail
 
 run_name=$1
-dirs=${2:-"gce-scale-cluster-master"}
+artifacts=${2:-""}
+
+if [ "$artifacts" == "master" ]; then
+    artifacts="gce-scale-cluster-master"
+fi
+
+case $run_name in
+    *gke*)
+        bucket=gs://gke-scalability-prow
+        ;;
+    *gce*)
+        bucket=gs://kubernetes-jenkins
+        ;;
+esac
+
 
 output="$HOME/debug/${run_name}"
 
 mkdir -p "${output}"
-gsutil -m  cp -R gs://kubernetes-jenkins/logs/"${run_name}"/artifacts/"${dirs}" "${output}"
+if [ -n "$artifacts" ]; then
+    gsutil -m  cp -R "${bucket}"/logs/"${run_name}"/artifacts/"${artifacts}" "${output}"
+else
+    gsutil -m  cp "${bucket}"/logs/"${run_name}"/build-log.txt "${output}"
+fi
+echo "Downloaded to ${output}"
